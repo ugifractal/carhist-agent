@@ -1,0 +1,42 @@
+# Name of the application. Used to uniquely configure containers.
+service: carhist-agent
+
+# Name of the container image. registry.server is prepended by Kamal, so the
+# registry host is not part of this value.
+image: ugifractal/carhist-agent
+
+# Deploy to these servers.
+servers:
+  web:
+    - drx.catfish-algol.ts.net
+
+ssh:
+  user: sugiarto
+
+# Public routing via kamal-proxy. TLS is terminated at Cloudflare (same as the
+# Rails app), so no cert is generated here.
+proxy:
+  ssl: false
+  hosts:
+    - carhist-agent.duruxignition.com
+  healthcheck:
+    path: /healthz
+
+# Credentials for the image host.
+registry:
+  server: ghcr.io
+  username: ugifractal
+  password:
+    - GHCR_TOKEN
+
+# Inject ENV variables into the container (secrets come from .kamal/secrets).
+env:
+  secret:
+    - GEMINI_API_KEY
+    - INTERNAL_API_SECRET
+  clear:
+    CARHIST_BASE_URL: https://carhist.duruxignition.com
+
+# Configure the image builder.
+builder:
+  arch: amd64
