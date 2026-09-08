@@ -19,6 +19,7 @@ proxy:
   ssl: false
   hosts:
     - carhist-agent.duruxignition.com
+  app_port: 8000
   healthcheck:
     path: /healthz
 
