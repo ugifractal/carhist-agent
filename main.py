@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import urllib.parse
 
 import requests
 from dataclasses import dataclass
@@ -84,6 +85,7 @@ class ChatRequest(BaseModel):
 class CarhistState(AgentState):
     active_car_id: NotRequired[int]
     photos: NotRequired[list[dict]]
+    pdf: NotRequired[dict]
 
 
 def _content_to_text(content):
@@ -115,6 +117,7 @@ def chat(request: ChatRequest):
         return {
             "answer": QUOTA_MESSAGE,
             "photos": [],
+            "pdf": None,
             "active_car_id": request.active_car_id,
             "rate_limited": True,
             "retry_after": remaining,
@@ -147,6 +150,7 @@ def chat(request: ChatRequest):
             return {
                 "answer": QUOTA_MESSAGE,
                 "photos": [],
+                "pdf": None,
                 "active_car_id": request.active_car_id,
                 "rate_limited": True,
                 "retry_after": delay,
@@ -155,6 +159,7 @@ def chat(request: ChatRequest):
         return {
             "answer": FALLBACK_MESSAGE,
             "photos": [],
+            "pdf": None,
             "active_car_id": request.active_car_id,
             "error": str(exc)[:500],
         }
@@ -173,6 +178,7 @@ def chat(request: ChatRequest):
     return {
         "answer": answer,
         "photos": response.get("photos", []),
+        "pdf": response.get("pdf"),
         "active_car_id": response.get("active_car_id"),
     }
 
@@ -258,8 +264,8 @@ def get_car(car_id: int, runtime: ToolRuntime) -> str:
 
 
 @tool
-def get_maintenance(runtime: ToolRuntime) -> str:
-    """Get maintenance history for a user's active car."""
+def get_maintenance(runtime: ToolRuntime, page: int = 1, query: str = "") -> str:
+    """Get maintenance history for a user's active car. Supports pagination (10 per page, page starts at 1) and search by title/description via query."""
 
     car_id = runtime.state.get("active_car_id")
     if car_id is None:
@@ -268,9 +274,21 @@ def get_maintenance(runtime: ToolRuntime) -> str:
     if car_id not in runtime.context.car_ids:
         return "The active car is no longer available."
 
-    print(f">>> get_maintenance: {car_id}")
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 1
+    page = max(1, page)
+    per_page = 10
 
-    data = _internal_get(f"/internal/cars/{car_id}/maintenances")
+    query = (query or "").strip()
+
+    print(f">>> get_maintenance: {car_id} page={page} query={query!r}")
+
+    path = f"/internal/cars/{car_id}/maintenances?page={page}&per_page={per_page}"
+    if query:
+        path += f"&q={urllib.parse.quote(query)}"
+    data = _internal_get(path)
 
     lines = []
     for maintenance in data["maintenances"]:
@@ -285,17 +303,25 @@ def get_maintenance(runtime: ToolRuntime) -> str:
         lines.append(line)
 
     if not lines:
-        return "No maintenance records for this car."
+        total_pages = max(1, (data["total"] + per_page - 1) // per_page) if data.get("total") is not None else 1
+        if data.get("total", 0) == 0:
+            if query:
+                return f"No records matching '{query}' for this car. Try another keyword or check page 1 without search."
+            return "No maintenance records for this car."
+        return f"No records on page {page}. Only {total_pages} page(s) available."
 
     total_pages = max(
         1, (data["total"] + data["per_page"] - 1) // data["per_page"]
     )
-    return "\n".join(lines) + f"\n\nPage {data['page']}/{total_pages}"
+    result = "\n".join(lines) + f"\n\nPage {data['page']}/{total_pages}"
+    if data["page"] < total_pages:
+        result += f"\nMinta 'halaman {data['page'] + 1}' untuk berikutnya."
+    return result
 
 
 @tool
-def get_maintenance_photos(runtime: ToolRuntime) -> Command:
-    """Get photos from the maintenance records of the user's active car."""
+def get_maintenance_photos(runtime: ToolRuntime, page: int = 1, query: str = "") -> Command:
+    """Get photos from the maintenance records of the user's active car. Supports pagination (10 per page, page starts at 1) and search by title/description via query — same page/query as get_maintenance."""
 
     car_id = runtime.state.get("active_car_id")
     if car_id is None:
@@ -322,9 +348,20 @@ def get_maintenance_photos(runtime: ToolRuntime) -> Command:
             }
         )
 
-    print(f">>> get_maintenance_photos: {car_id}")
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 1
+    page = max(1, page)
+    per_page = 10
+    query = (query or "").strip()
 
-    data = _internal_get(f"/internal/cars/{car_id}/maintenances")
+    print(f">>> get_maintenance_photos: {car_id} page={page} query={query!r}")
+
+    path = f"/internal/cars/{car_id}/maintenances?page={page}&per_page={per_page}"
+    if query:
+        path += f"&q={urllib.parse.quote(query)}"
+    data = _internal_get(path)
 
     photos = []
     for maintenance in data["maintenances"]:
@@ -350,7 +387,100 @@ def get_maintenance_photos(runtime: ToolRuntime) -> Command:
 
 
 @tool
-def select_car(car_id: int, runtime: ToolRuntime) -> str:
+def generate_maintenance_pdf(runtime: ToolRuntime, query: str = "") -> Command:
+    """Generate a PDF file for service history of the active car. Uses all pages (not just current page), filtered by title/description when query is provided. Only call when user explicitly asks for PDF/export/download."""
+
+    car_id = runtime.state.get("active_car_id")
+    if car_id is None:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="No active car selected. Please select a car first.",
+                        tool_call_id=runtime.tool_call_id,
+                    )
+                ]
+            }
+        )
+
+    if car_id not in runtime.context.car_ids:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="The active car is no longer available.",
+                        tool_call_id=runtime.tool_call_id,
+                    )
+                ]
+            }
+        )
+
+    query = (query or "").strip()
+
+    print(f">>> generate_maintenance_pdf: {car_id} query={query!r}")
+
+    try:
+        # Call Rails internal endpoint that generates PDF for all matching records.
+        response = requests.post(
+            f"{os.getenv('CARHIST_BASE_URL')}/internal/cars/{car_id}/maintenance_reports",
+            json={"q": query} if query else {},
+            headers=INTERNAL_HEADERS,
+            timeout=60,
+        )
+        if response.status_code == 422:
+            try:
+                msg = response.json().get("error", "")
+            except Exception:
+                msg = response.text
+            content = msg or f"No records matching '{query}' for this car."
+            return Command(
+                update={
+                    "messages": [
+                        ToolMessage(content=content, tool_call_id=runtime.tool_call_id)
+                    ]
+                }
+            )
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as exc:
+        print(f"generate_maintenance_pdf failed: {exc}")
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=f"Failed to generate PDF: {exc}",
+                        tool_call_id=runtime.tool_call_id,
+                    )
+                ]
+            }
+        )
+
+    pdf_payload = {
+        "data": data.get("data", ""),
+        "filename": data.get("filename", "maintenance_report.pdf"),
+        "mime_type": data.get("mime_type", "application/pdf"),
+        "caption": f"Riwayat servis untuk mobil {car_id}" + (f" (filter: '{query}')" if query else "") + f" — {data.get('record_count', '')} record(s).",
+        "byte_size": data.get("byte_size"),
+        "record_count": data.get("record_count"),
+    }
+
+    content = f"PDF ready for car {car_id}"
+    if query:
+        content += f" matching '{query}'"
+    content += f" — {data.get('record_count', 0)} record(s), {data.get('byte_size', 0)} bytes. The PDF will be sent as a document."
+
+    return Command(
+        update={
+            "pdf": pdf_payload,
+            "messages": [
+                ToolMessage(content=content, tool_call_id=runtime.tool_call_id)
+            ],
+        }
+    )
+
+
+@tool
+def select_car(car_id: int, runtime: ToolRuntime) -> Command:
     """Select the user's active car."""
 
     if car_id not in runtime.context.car_ids:
@@ -377,6 +507,7 @@ agent = create_agent(
         get_car,
         get_maintenance,
         get_maintenance_photos,
+        generate_maintenance_pdf,
         select_car
     ],
     context_schema=Context,
@@ -405,10 +536,27 @@ agent = create_agent(
     about maintenance or photos for a specific car.
 
     Use get_maintenance when you need the maintenance history
-    of the user's active car.
+    of the user's active car. It is paginated: 10 per page,
+    page starts at 1 (default). When the user says
+    "berikutnya", "halaman 2", "more", or asks for more
+    records, call it again with the next page number.
+    It also accepts an optional query to search by title or
+    description (e.g. "oli", "rem", "AC"); pass query when
+    the user names a part/symptom or asks to search/filter;
+    omit or use empty query for the full history.
 
     Use get_maintenance_photos when the user wants to see
     photos from the maintenance records of the active car.
+    It is also paginated (10 per page) and searchable by
+    query — use the same page and query as get_maintenance
+    so photos match the records shown.
+
+    Use generate_maintenance_pdf only when the user explicitly
+    asks for a PDF/export/download of service history.
+    It generates a PDF for the active car using all matching
+    records (all pages), optionally filtered by query on title
+    or description (pass the same query as get_maintenance
+    when filtering). Do not call it for normal history questions.
 
     After using a tool, always provide a natural-language
     answer to the user based on the tool result.

@@ -142,7 +142,9 @@ def test_get_maintenance_calls_internal_endpoint_for_active_car():
     assert "Oil change engine" in result
     assert "150000" in result
     url = mocked.call_args[0][0]
-    assert url.endswith("/internal/cars/123/maintenances")
+    assert "/internal/cars/123/maintenances" in url
+    assert "page=1" in url
+    assert "per_page=10" in url
 
 
 def test_get_maintenance_requires_active_car():
