@@ -33,7 +33,8 @@ registry:
 # Inject ENV variables into the container (secrets come from .kamal/secrets).
 env:
   secret:
-    - GEMINI_API_KEY
+    # - GEMINI_API_KEY  # temporarily disabled — using Groq free tier
+    - GROQ_API_KEY  # Groq free tier (openai/gpt-oss-120b)
     - INTERNAL_API_SECRET
   clear:
     CARHIST_BASE_URL: https://carhist.duruxignition.com

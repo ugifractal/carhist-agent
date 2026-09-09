@@ -11,7 +11,8 @@ from pydantic import BaseModel
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentState
 from langchain.tools import tool, ToolRuntime
-from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain_google_genai import ChatGoogleGenerativeAI  # GEMINI — temporarily disabled, switch to Groq (free tier)
+from langchain_groq import ChatGroq  # GROQ — free tier (openai/gpt-oss-120b)
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
@@ -204,9 +205,15 @@ def _internal_post(path: str, payload: dict):
     return response.json()
 
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    google_api_key=os.getenv("GEMINI_API_KEY"),
+# llm = ChatGoogleGenerativeAI(  # GEMINI — temporarily disabled
+#     model="gemini-2.5-flash",
+#     google_api_key=os.getenv("GEMINI_API_KEY"),
+# )
+
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",  # FREE — Groq permanent free tier (30 RPM / 1K RPD / 8K TPM / 200K TPD)
+    api_key=os.getenv("GROQ_API_KEY"),
+    temperature=0,
 )
 
 
@@ -216,13 +223,19 @@ def search_knowledge(query: str) -> str:
     Search the Carhist knowledge base for automotive information,
     including error codes, diagnostics, parts, maintenance,
     taxes, and regulations.
+    Strict RAG: caller must not answer from parametric knowledge.
     """
 
     print(f">>> search_knowledge: {query}")
 
     data = _internal_post("/internal/knowledge_base/search", {"query": query})
 
-    return data.get("context", "")
+    context = (data.get("context") or "").strip()
+    if not context:
+        return "NO_KNOWLEDGE_FOUND: no document matched query. Do not answer from general knowledge. You must refuse."
+
+    # Include chunk metadata for citation/debugging if available (not required for answer).
+    return context
 
 
 @tool
@@ -513,7 +526,7 @@ agent = create_agent(
     context_schema=Context,
     state_schema=CarhistState,
     system_prompt="""
-    You are Carhist, an automotive assistant.
+    You are Carhist, a strict RAG automotive assistant.
 
     You can help users with:
     - vehicle diagnostics
@@ -523,6 +536,14 @@ agent = create_agent(
     - vehicle taxes
     - automotive regulations
     - general vehicle questions
+
+    GROUNDING RULES (STRICT — MUST FOLLOW):
+    1. You MUST call search_knowledge for any factual question about specs, oil, error codes, parts, maintenance, taxes, or regulations before answering.
+    2. Answer ONLY from the tool's returned context. Do not use parametric/general knowledge.
+    3. If the tool returns NO_KNOWLEDGE_FOUND or the context does not contain the answer, you MUST refuse with EXACTLY: "Maaf, informasi tersebut tidak ditemukan di dokumen pengetahuan Carhist. Silakan cek buku manual resmi atau hubungi bengkel resmi." Do not add anything else.
+    4. Never invent or mention engine variants, oil specs, or manual references (e.g., "1.0 L Turbo", "1.4 L Turbo", "5W-30", "Dexos", "buku manual") unless they appear verbatim in the tool output.
+    5. Never add generic disclaimers like "Catatan penting — varian mesin — buku manual — dealer resmi" unless present in the context.
+    6. Never hallucinate citations. If no context, do not cite.
 
     Use search_knowledge when the user's question
     requires information from the Carhist knowledge base.
@@ -561,8 +582,6 @@ agent = create_agent(
     After using a tool, always provide a natural-language
     answer to the user based on the tool result.
 
-
-    Do not invent information that is not supported
-    by the knowledge base.
+    Match the user's language (Indonesian or English).
     """
 )
