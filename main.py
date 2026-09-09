@@ -1,4 +1,6 @@
 import os
+import re
+import time
 
 import requests
 from dataclasses import dataclass
@@ -16,6 +18,41 @@ from typing import NotRequired
 
 load_dotenv()
 app = FastAPI()
+
+# Fail fast on Gemini quota errors so callers (Telegram webhook via Rails)
+# get a 200 with a friendly answer instead of a 500 that triggers retries.
+# Free-tier daily quota (20 req/day) does not reset in seconds, so hold the
+# circuit breaker for at least 10 minutes even if the API hints a shorter delay.
+QUOTA_MESSAGE = (
+    "Maaf, kuota AI sedang habis. Silakan coba lagi sekitar 10 menit."
+)
+RATE_LIMIT_COOLDOWN_SECONDS = 600
+FALLBACK_MESSAGE = (
+    "Maaf, layanan asisten sedang tidak tersedia. Silakan coba lagi nanti."
+)
+_quota_exhausted_until: float = 0.0
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    text = f"{name} {exc}".lower()
+    return (
+        "ratelimit" in name
+        or "resourceexhausted" in name
+        or "429" in text
+        or "resource_exhausted" in text
+        or "quota" in text
+    )
+
+
+def _retry_delay_seconds(exc: Exception, default: int = RATE_LIMIT_COOLDOWN_SECONDS) -> int:
+    match = re.search(r"retry in ([\d.]+)s", str(exc), re.IGNORECASE)
+    if match:
+        try:
+            return max(RATE_LIMIT_COOLDOWN_SECONDS, int(float(match.group(1))))
+        except ValueError:
+            pass
+    return default
 
 
 @app.get("/healthz")
@@ -71,24 +108,56 @@ def _content_to_text(content):
 
 @app.post("/agent/chat")
 def chat(request: ChatRequest):
+    global _quota_exhausted_until
+    now = time.monotonic()
+    if now < _quota_exhausted_until:
+        remaining = max(1, int(_quota_exhausted_until - now))
+        return {
+            "answer": QUOTA_MESSAGE,
+            "photos": [],
+            "active_car_id": request.active_car_id,
+            "rate_limited": True,
+            "retry_after": remaining,
+        }
+
     context = Context(
         user_id=request.user_id,
         car_ids=request.car_ids,
         active_car_id=request.active_car_id,
     )
 
-    response = agent.invoke(
-        {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": request.message,
-                }
-            ],
+    try:
+        response = agent.invoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": request.message,
+                    }
+                ],
+                "active_car_id": request.active_car_id,
+            },
+            context=context,
+        )
+    except Exception as exc:
+        if _is_rate_limit_error(exc):
+            delay = _retry_delay_seconds(exc)
+            _quota_exhausted_until = time.monotonic() + delay
+            print(f"Agent rate-limited, fail fast for {delay}s: {exc}")
+            return {
+                "answer": QUOTA_MESSAGE,
+                "photos": [],
+                "active_car_id": request.active_car_id,
+                "rate_limited": True,
+                "retry_after": delay,
+            }
+        print(f"Agent invoke failed: {exc}")
+        return {
+            "answer": FALLBACK_MESSAGE,
+            "photos": [],
             "active_car_id": request.active_car_id,
-        },
-        context=context,
-    )
+            "error": str(exc)[:500],
+        }
 
     print(f"Agent response: {response}")
 
