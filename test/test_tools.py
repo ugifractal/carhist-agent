@@ -140,7 +140,10 @@ def test_get_maintenance_calls_internal_endpoint_for_active_car():
 
     assert "Engine oil changed" in result
     assert "Oil change engine" in result
-    assert "150000" in result
+    assert "Rp 150.000" in result
+    assert "Tanggal:" in result
+    assert "Judul servis:" in result
+    assert "Keterangan: —" in result
     url = mocked.call_args[0][0]
     assert "/internal/cars/123/maintenances" in url
     assert "page=1" in url

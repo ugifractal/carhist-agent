@@ -89,6 +89,15 @@ class CarhistState(AgentState):
     pdf: NotRequired[dict]
 
 
+def _format_idr(value: int) -> str:
+    """Format integer as IDR Rupiah with dots: 150000 -> Rp 150.000"""
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return f"Rp {n:,}".replace(",", ".")
+
+
 def _content_to_text(content):
     """Flatten a langchain/Google message `content` into a plain string.
 
@@ -306,14 +315,20 @@ def get_maintenance(runtime: ToolRuntime, page: int = 1, query: str = "") -> str
     lines = []
     for maintenance in data["maintenances"]:
         date = (maintenance.get("performed_at") or "Tanpa tanggal")[:10]
+        title = maintenance.get("title", "")
         type_label = maintenance.get("maintenance_type", "").replace("_", " ").capitalize()
+        description = (maintenance.get("description") or "").strip()
         cost_total = sum(
             item.get("subtotal", 0) for item in maintenance.get("cost_items", [])
         )
-        line = f"{date}: {maintenance['title']} ({type_label})"
-        if cost_total:
-            line += f" - total cost: {cost_total}"
-        lines.append(line)
+        block = [
+            f"Tanggal: {date}",
+            f"Judul servis: {title}",
+            f"Jenis: {type_label}",
+            f"Keterangan: {description if description else '—'}",
+            f"Total biaya: {_format_idr(cost_total) if cost_total else '—'}",
+        ]
+        lines.append("\n".join(block))
 
     if not lines:
         total_pages = max(1, (data["total"] + per_page - 1) // per_page) if data.get("total") is not None else 1
@@ -326,10 +341,80 @@ def get_maintenance(runtime: ToolRuntime, page: int = 1, query: str = "") -> str
     total_pages = max(
         1, (data["total"] + data["per_page"] - 1) // data["per_page"]
     )
-    result = "\n".join(lines) + f"\n\nPage {data['page']}/{total_pages}"
+    result = "\n\n---\n\n".join(lines) + f"\n\nPage {data['page']}/{total_pages}"
     if data["page"] < total_pages:
         result += f"\nMinta 'halaman {data['page'] + 1}' untuk berikutnya."
     return result
+
+
+@tool
+def get_maintenance_cost(runtime: ToolRuntime, query: str) -> str:
+    """Get itemized costs and grand total for a specific service history of the active car. query is the service title/description to search (e.g. 'ganti oli', 'rem', 'AC'). Use when user asks 'biaya', 'rincian biaya', 'total biaya', or 'harga' for a specific record."""
+
+    car_id = runtime.state.get("active_car_id")
+    if car_id is None:
+        return "No active car selected."
+
+    if car_id not in runtime.context.car_ids:
+        return "The active car is no longer available."
+
+    query = (query or "").strip()
+    if not query:
+        return "Mohon sebutkan judul servis yang ingin dirinci biayanya (mis. 'ganti oli')."
+
+    print(f">>> get_maintenance_cost: {car_id} query={query!r}")
+
+    # Reuse maintenances search (title/description ILIKE) — fetch first page of matches.
+    path = f"/internal/cars/{car_id}/maintenances?q={urllib.parse.quote(query)}&page=1&per_page=10"
+    data = _internal_get(path)
+
+    maintenances = data.get("maintenances", [])
+    total = data.get("total", len(maintenances))
+
+    if not maintenances:
+        return f"Tidak ada riwayat servis dengan judul/deskripsi '{query}' untuk mobil ini."
+
+    # If multiple matches, pick the most recent (first, ordered by performed_at desc) but inform user.
+    if total > 1:
+        header = f"Ditemukan {total} riwayat dengan kata kunci '{query}', menampilkan yang terbaru:\n"
+
+    else:
+        header = ""
+
+    m = maintenances[0]
+    date = (m.get("performed_at") or "Tanpa tanggal")[:10]
+    type_label = m.get("maintenance_type", "").replace("_", " ").capitalize()
+    title = m.get("title", "")
+
+    cost_items = m.get("cost_items", [])
+    if not cost_items:
+        return f"{header}{date}: {title} ({type_label}) — Tidak ada rincian biaya untuk servis ini."
+
+    lines = [f"{header}{date}: {title} ({type_label})", "Rincian biaya:"]
+    grand_total = 0
+    for item in cost_items:
+        item_title = item.get("title", "Tanpa judul")
+        price = item.get("price", 0) or 0
+        qty = item.get("quantity", 0) or 0
+        subtotal = item.get("subtotal", 0) or (price * qty)
+        try:
+            grand_total += int(subtotal)
+        except (TypeError, ValueError):
+            pass
+        line = f"- {item_title} x{qty} @ {_format_idr(price)} = {_format_idr(subtotal)}"
+        desc = (item.get("description") or "").strip()
+        if desc:
+            line += f" — {desc}"
+        buy_link = (item.get("buy_link") or "").strip()
+        if buy_link:
+            line += f" ({buy_link})"
+        lines.append(line)
+
+    lines.append(f"Total: {_format_idr(grand_total)}")
+    if total > 1:
+        lines.append(f"\nMenampilkan 1 dari {total} hasil. Sebutkan judul lebih spesifik untuk riwayat lain.")
+
+    return "\n".join(lines)
 
 
 @tool
@@ -519,6 +604,7 @@ agent = create_agent(
         list_cars,
         get_car,
         get_maintenance,
+        get_maintenance_cost,
         get_maintenance_photos,
         generate_maintenance_pdf,
         select_car
@@ -565,6 +651,9 @@ agent = create_agent(
     description (e.g. "oli", "rem", "AC"); pass query when
     the user names a part/symptom or asks to search/filter;
     omit or use empty query for the full history.
+    It returns per-record labeled blocks (Tanggal, Judul servis, Jenis, Keterangan, Total biaya) separated by "---" — keep this block format as-is, do NOT reformat as a Markdown table.
+
+    Use get_maintenance_cost when the user asks for cost breakdown for a specific service history (e.g., "biaya", "rincian biaya", "total biaya", "harga" for a specific record). The query is the service title/description to search (e.g., "ganti oli", "rem"). It returns itemized costs (title x qty @ price = subtotal, plus description and buy_link if present) and grand total per record. If multiple matches, it shows the most recent. Call get_maintenance first to discover titles/dates if the query is vague.
 
     Use get_maintenance_photos when the user wants to see
     photos from the maintenance records of the active car.
