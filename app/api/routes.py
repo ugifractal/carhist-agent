@@ -1,7 +1,8 @@
 import time
 
 from fastapi import APIRouter, FastAPI
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages.ai import add_usage
 
 from app.agent.factory import create_carhist_agent
 from app.schemas import CarhistState, ChatRequest, Context
@@ -85,6 +86,31 @@ def chat(request: ChatRequest):
             "active_car_id": request.active_car_id,
             "error": str(exc)[:500],
         }
+
+    # --- logging: messages + token usage (Groq openai/gpt-oss-120b) ---
+    print("=== agent.invoke messages ===")
+    for m in response.get("messages", []):
+        # limit content preview to 500 chars to avoid log flood
+        content = getattr(m, "content", "")
+        preview = str(content)[:500].replace("\n", " ")
+        print(f"- {m.__class__.__name__}: {preview!r} | id={getattr(m, 'id', None)}")
+
+    usage = None
+    for m in response.get("messages", []):
+        if isinstance(m, AIMessage) and getattr(m, "usage_metadata", None):
+            usage = add_usage(usage, m.usage_metadata)
+
+    last_ai = next((m for m in reversed(response.get("messages", [])) if isinstance(m, AIMessage)), None)
+    raw = (last_ai.response_metadata.get("token_usage") if last_ai and getattr(last_ai, "response_metadata", None) else {}) if last_ai else {}
+
+    if usage:
+        print(
+            f"[tokens] model=openai/gpt-oss-120b input={usage.get('input_tokens')} output={usage.get('output_tokens')} total={usage.get('total_tokens')} "
+            f"reasoning={usage.get('output_token_details', {}).get('reasoning', 0)} cached_read={usage.get('input_token_details', {}).get('cache_read', 0)}"
+        )
+        print(f"[tokens raw] usage_metadata={usage} token_usage={raw} model_meta={last_ai.response_metadata if last_ai else {}}")
+    else:
+        print("[tokens] no usage_metadata (fake model or no tokens)")
 
     print(f"Agent response: {response}")
 
