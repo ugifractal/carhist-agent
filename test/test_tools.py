@@ -57,12 +57,14 @@ def test_list_cars_builds_url_and_lists_cars():
     ) as mocked:
         result = list_cars.func(runtime)
 
+    assert "No: 1" in result
     assert "Nama: Trax" in result
     assert "Model: Chevrolet Trax" in result
     assert "Tahun: 2017" in result
-    assert "ID 123:" in result
+    assert "No: 2" in result
     assert "Nama: Jimny" in result
-    assert "Model: Suzuki Jimny" in result
+    assert "ID 123" not in result
+    assert "ID 456" not in result
     url = mocked.call_args[0][0]
     assert url.endswith("/internal/cars?car_ids=123,456")
 
@@ -110,7 +112,7 @@ def test_get_car_rejects_car_not_owned_by_user():
     with patch.object(main.requests, "get") as mocked:
         result = get_car.func(999, runtime)
 
-    assert "not available" in result
+    assert "tidak tersedia" in result.lower()
     mocked.assert_not_called()
 
 
@@ -175,24 +177,26 @@ def test_get_maintenance_photos_updates_state_with_photos():
                     {
                         "id": 1,
                         "title": "Engine oil changed",
+                        "performed_at": "2026-08-10T00:00:00+07:00",
                         "photos": [
                             {"url": "https://carhist.com/a.jpg", "caption": "Foto 1"}
                         ],
                     }
                 ],
                 "page": 1,
-                "per_page": 20,
+                "per_page": 10,
                 "total": 1,
             }
         ),
     ):
-        command = get_maintenance_photos.func(runtime)
+        command = get_maintenance_photos.func(runtime, index=1)
 
     assert command.update["photos"] == [
         {"url": "https://carhist.com/a.jpg", "caption": "Foto 1"}
     ]
     message = command.update["messages"][0]
     assert "1 foto" in message.content
+    assert "No: 1" in message.content
 
 
 def test_content_to_text_accepts_plain_string():

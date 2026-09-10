@@ -24,7 +24,7 @@ def test_select_car_updates_state():
                     {
                         "name": "select_car",
                         "args": {
-                            "car_id": 123,
+                            "car_id": 1,
                         },
                         "id": "call-1",
                         "type": "tool_call",

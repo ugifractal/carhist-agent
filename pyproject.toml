@@ -12,6 +12,7 @@ dependencies = [
     "langchain-groq>=0.3.0",  # GROQ — free tier (openai/gpt-oss-120b)
     "langgraph>=1.2.11",
     "python-dotenv>=1.2.3",
+    "requests>=2.32.0",
     "uvicorn>=0.52.4",
 ]
 
