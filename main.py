@@ -268,11 +268,15 @@ def list_cars(runtime: ToolRuntime) -> str:
         name = (c.get("name") or "").strip()
         brand = c.get("brand_name") or ""
         year = c.get("year") or ""
+        km = c.get("km")
+        km_formatted = c.get("km_formatted")
+        km_display = km_formatted if km_formatted else (_format_idr(km) if km else "—")
         lines = [f"ID {c['id']}:"]
         if name:
             lines.append(f"  Nama: {name}")
         lines.append(f"  Model: {brand}")
         lines.append(f"  Tahun: {year}")
+        lines.append(f"  Km: {km_display}")
         blocks.append("\n".join(lines))
     return "Berikut daftar mobil terdaftar:\n\n" + "\n\n".join(blocks) + "\n\nSilakan pilih ID dengan select_car <id>."
 
@@ -288,11 +292,15 @@ def get_car(car_id: int, runtime: ToolRuntime) -> str:
 
     car = _internal_get(f"/internal/cars/{car_id}")["car"]
 
+    km = car.get("km")
+    km_formatted = car.get("km_formatted")
+    km_display = km_formatted if km_formatted else (_format_idr(km) if km else "—")
     return (
         f"Car ID: {car['id']}\n"
         f"Name: {car['name']}\n"
         f"Make/Model: {car['brand_name']}\n"
-        f"Year: {car['year']}"
+        f"Year: {car['year']}\n"
+        f"Km: {km_display}"
     )
 
 
@@ -426,6 +434,41 @@ def get_maintenance_cost(runtime: ToolRuntime, query: str) -> str:
         lines.append(f"\nMenampilkan 1 dari {total} hasil. Sebutkan judul lebih spesifik untuk riwayat lain.")
 
     return "\n".join(lines)
+
+
+@tool
+def update_odometer(car_id: int, km: int, runtime: ToolRuntime) -> str:
+    """Update odometer/km for a specific car. Mention the car explicitly by ID. km must be positive integer."""
+
+    if car_id not in runtime.context.car_ids:
+        return f"Mobil dengan ID {car_id} tidak tersedia untuk pengguna ini. Gunakan list_cars untuk melihat daftar."
+
+    try:
+        km = int(km)
+    except (TypeError, ValueError):
+        return "Km harus angka bilangan bulat positif, contoh: update_odometer 11 50000."
+
+    if km <= 0:
+        return "Km harus angka positif lebih dari 0."
+
+    print(f">>> update_odometer: car_id={car_id} km={km}")
+
+    try:
+        data = _internal_post(f"/internal/cars/{car_id}/car_activities", {"km": km})
+    except requests.exceptions.HTTPError as exc:
+        # Extract error from Rails JSON if available
+        try:
+            body = exc.response.json() if exc.response is not None else {}
+            msg = body.get("error") or str(exc)
+        except Exception:
+            msg = str(exc)
+        return msg
+    except requests.exceptions.RequestException as exc:
+        return f"Gagal memperbarui odometer: {exc}"
+
+    car_name = data.get("car_name") or f"ID {car_id}"
+    formatted = data.get("km_formatted") or _format_idr(data.get("km", km))
+    return f"Odometer mobil {car_name} (ID {car_id}) diperbarui: {formatted} km."
 
 
 @tool
@@ -632,7 +675,8 @@ agent = create_agent(
         get_maintenance_cost,
         get_maintenance_photos,
         generate_maintenance_pdf,
-        select_car
+        select_car,
+        update_odometer
     ],
     context_schema=Context,
     state_schema=CarhistState,
@@ -681,6 +725,8 @@ agent = create_agent(
     Use get_maintenance_cost when the user asks for cost breakdown for a specific service history (e.g., "biaya", "rincian biaya", "total biaya", "harga" for a specific record). The query is the service title/description to search (e.g., "ganti oli", "rem"). It returns itemized costs (title x qty @ price = subtotal, plus description and buy_link if present) and grand total per record. If multiple matches, it shows the most recent. Call get_maintenance first to discover titles/dates if the query is vague.
 
     Use get_maintenance_photos when the user wants photos for maintenance. query is optional title/description to filter (e.g., 'ganti oli'). Without query it returns up to 20 photos from all recent services (dump all). With query it returns up to 20 photos from all matching services (show all matches). Not paginated — dumps up to 20 in one call.
+
+    Use update_odometer when the user wants to update odometer/km for a specific car. You MUST mention the car explicitly by ID. Example: "update km mobil 11 jadi 50000" → call update_odometer with car_id 11 and km 50000. It requires explicit car_id from list_cars/get_car; do not guess from active_car. It will reject decreasing km in chat (use web form for correction).
 
     Use generate_maintenance_pdf only when the user explicitly
     asks for a PDF/export/download of service history.
