@@ -57,8 +57,12 @@ def test_list_cars_builds_url_and_lists_cars():
     ) as mocked:
         result = list_cars.func(runtime)
 
-    assert "- ID 123: Chevrolet Trax (2017)" in result
-    assert "- ID 456: Suzuki Jimny (2020)" in result
+    assert "Nama: Trax" in result
+    assert "Model: Chevrolet Trax" in result
+    assert "Tahun: 2017" in result
+    assert "ID 123:" in result
+    assert "Nama: Jimny" in result
+    assert "Model: Suzuki Jimny" in result
     url = mocked.call_args[0][0]
     assert url.endswith("/internal/cars?car_ids=123,456")
 
@@ -188,7 +192,7 @@ def test_get_maintenance_photos_updates_state_with_photos():
         {"url": "https://carhist.com/a.jpg", "caption": "Foto 1"}
     ]
     message = command.update["messages"][0]
-    assert message.content == "Found 1 photos for maintenance of this car."
+    assert "1 foto" in message.content
 
 
 def test_content_to_text_accepts_plain_string():

@@ -258,12 +258,23 @@ def list_cars(runtime: ToolRuntime) -> str:
         return "No cars found for this user."
 
     data = _internal_get("/internal/cars?car_ids=" + ",".join(map(str, car_ids)))
+
     cars = data.get("cars", [])
     if not cars:
         return "No cars found for this user."
 
-    lines = [f"- ID {c['id']}: {c['brand_name']} ({c['year']})" for c in cars]
-    return "\n".join(lines)
+    blocks = []
+    for c in cars:
+        name = (c.get("name") or "").strip()
+        brand = c.get("brand_name") or ""
+        year = c.get("year") or ""
+        lines = [f"ID {c['id']}:"]
+        if name:
+            lines.append(f"  Nama: {name}")
+        lines.append(f"  Model: {brand}")
+        lines.append(f"  Tahun: {year}")
+        blocks.append("\n".join(lines))
+    return "Berikut daftar mobil terdaftar:\n\n" + "\n\n".join(blocks) + "\n\nSilakan pilih ID dengan select_car <id>."
 
 
 @tool
@@ -418,8 +429,8 @@ def get_maintenance_cost(runtime: ToolRuntime, query: str) -> str:
 
 
 @tool
-def get_maintenance_photos(runtime: ToolRuntime, page: int = 1, query: str = "") -> Command:
-    """Get photos from the maintenance records of the user's active car. Supports pagination (10 per page, page starts at 1) and search by title/description via query — same page/query as get_maintenance."""
+def get_maintenance_photos(runtime: ToolRuntime, query: str = "") -> Command:
+    """Get photos for the active car's maintenance history. query is optional title/description to filter (e.g., 'ganti oli'). Without query, returns photos from all recent services (up to 20). With query, returns photos from all matching services (up to 20). Not paginated — dumps up to 20 in one call."""
 
     car_id = runtime.state.get("active_car_id")
     if car_id is None:
@@ -446,30 +457,44 @@ def get_maintenance_photos(runtime: ToolRuntime, page: int = 1, query: str = "")
             }
         )
 
-    try:
-        page = int(page)
-    except (TypeError, ValueError):
-        page = 1
-    page = max(1, page)
-    per_page = 10
     query = (query or "").strip()
 
-    print(f">>> get_maintenance_photos: {car_id} page={page} query={query!r}")
+    print(f">>> get_maintenance_photos: {car_id} query={query!r}")
 
-    path = f"/internal/cars/{car_id}/maintenances?page={page}&per_page={per_page}"
+    per_page = 20
+    path = f"/internal/cars/{car_id}/maintenances?page=1&per_page={per_page}"
     if query:
         path += f"&q={urllib.parse.quote(query)}"
     data = _internal_get(path)
 
+    maintenances = data.get("maintenances", [])
+    total = data.get("total", len(maintenances))
+
     photos = []
-    for maintenance in data["maintenances"]:
+    for maintenance in maintenances:
         for photo in maintenance.get("photos", []):
             photos.append(photo)
+            if len(photos) >= 20:
+                break
+        if len(photos) >= 20:
+            break
 
-    if photos:
-        content = f"Found {len(photos)} photos for maintenance of this car."
+    if not maintenances and query:
+        content = f"Tidak ada riwayat servis dengan judul/deskripsi '{query}' untuk mobil ini."
+    elif not photos:
+        if query:
+            content = f"Tidak ada foto untuk riwayat dengan kata kunci '{query}'."
+        else:
+            content = "Tidak ada foto untuk riwayat mobil ini."
     else:
-        content = "No photos found for this car's maintenance records."
+        if query:
+            content = f"Menampilkan {len(photos)} foto dari {len(maintenances)} riwayat dengan kata kunci '{query}' (total {total} riwayat cocok)."
+            if len(photos) >= 20 and total > len(maintenances):
+                content += " Menampilkan 20 foto pertama — sebutkan judul lebih spesifik untuk riwayat lain."
+        else:
+            content = f"Menampilkan {len(photos)} foto dari {total} riwayat terbaru."
+            if len(photos) >= 20:
+                content += " Menampilkan 20 foto pertama."
 
     return Command(
         update={
@@ -637,7 +662,7 @@ agent = create_agent(
     Use get_car when the user asks about their vehicle.
 
     Use list_cars when the user wants to see the list of
-    their cars before selecting one.
+    their cars before selecting one. It returns per-car blocks with Nama, Model, Tahun. When answering, you MUST preserve the Nama field exactly as returned, even if name is substring of Model (e.g., "trax" vs "Chevrolet Trax"). Do not deduplicate or omit name.
 
     Use select_car to set the active car before asking
     about maintenance or photos for a specific car.
@@ -655,11 +680,7 @@ agent = create_agent(
 
     Use get_maintenance_cost when the user asks for cost breakdown for a specific service history (e.g., "biaya", "rincian biaya", "total biaya", "harga" for a specific record). The query is the service title/description to search (e.g., "ganti oli", "rem"). It returns itemized costs (title x qty @ price = subtotal, plus description and buy_link if present) and grand total per record. If multiple matches, it shows the most recent. Call get_maintenance first to discover titles/dates if the query is vague.
 
-    Use get_maintenance_photos when the user wants to see
-    photos from the maintenance records of the active car.
-    It is also paginated (10 per page) and searchable by
-    query — use the same page and query as get_maintenance
-    so photos match the records shown.
+    Use get_maintenance_photos when the user wants photos for maintenance. query is optional title/description to filter (e.g., 'ganti oli'). Without query it returns up to 20 photos from all recent services (dump all). With query it returns up to 20 photos from all matching services (show all matches). Not paginated — dumps up to 20 in one call.
 
     Use generate_maintenance_pdf only when the user explicitly
     asks for a PDF/export/download of service history.
